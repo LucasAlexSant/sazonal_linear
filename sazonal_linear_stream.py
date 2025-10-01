@@ -152,23 +152,19 @@ class TimeSeriesAnalyzer:
             else:
                 seasonality_tests['weekly'] = {'has_pattern': False, 'reason': 'Dados insuficientes'}
 
-        # Classificação
+        # Classificação simplificada
         daily_var = seasonality_tests.get('daily', {}).get('variance_explained', 0)
         weekly_var = seasonality_tests.get('weekly', {}).get('variance_explained', 0)
         daily_significant = seasonality_tests.get('daily', {}).get('has_pattern', False)
         weekly_significant = seasonality_tests.get('weekly', {}).get('has_pattern', False)
 
-        if daily_significant and daily_var > 15:
-            if weekly_significant and weekly_var > 10:
-                main_seasonality, season_type = "SAZONAL_MISTA", "mista (diária + semanal)"
-            else:
-                main_seasonality, season_type = "SAZONAL_DIARIA", "diária"
+        # Prioriza diária se ambas forem significativas
+        if daily_significant and daily_var > 10:
+            main_seasonality, season_type = "SAZONAL_DIARIA", "diária"
         elif weekly_significant and weekly_var > 10:
             main_seasonality, season_type = "SAZONAL_SEMANAL", "semanal"
-        elif daily_significant or weekly_significant:
-            main_seasonality, season_type = "SAZONAL_FRACA", "fraca"
         else:
-            main_seasonality, season_type = "LINEAR", "não sazonal"
+            main_seasonality, season_type = "LINEAR", "linear"
 
         self.seasonality_results = {
             'classification': main_seasonality,
@@ -198,8 +194,6 @@ class TimeSeriesAnalyzer:
                 period = 24 if freq_seconds <= 3600 else 7 if freq_seconds <= 86400 else max(2, n // 10)
             elif seasonality_info['classification'] == 'SAZONAL_SEMANAL':
                 period = 7 if freq_seconds <= 86400 else max(2, n // 10)
-            elif seasonality_info['classification'] == 'SAZONAL_MISTA':
-                period = 24 if freq_seconds <= 3600 else 7
             else:
                 period = max(2, min(n // 4, 12))
             period = min(period, n // 2)
@@ -314,8 +308,6 @@ def show_seasonality_results(seasonality_results):
     color_map = {
         'SAZONAL_DIARIA': '🟢',
         'SAZONAL_SEMANAL': '🔵',
-        'SAZONAL_MISTA': '🟡',
-        'SAZONAL_FRACA': '🟠',
         'LINEAR': '⚪'
     }
     col1.metric("Classificação", f"{color_map.get(classification, '❓')} {classification}")
@@ -466,8 +458,8 @@ def batch_analyze_all(threshold_std: float = 3.0):
     return df_results, classification_counts
 
 def main():
-    st.title("📈 Análise Avançada de Séries Temporais com Detecção de Sazonalidade")
-    st.markdown("**Sistema aprimorado para detectar padrões sazonais diários e semanais**")
+    st.title("📈 Análise de Séries Temporais - Classificação Simplificada")
+    st.markdown("**Sistema para classificar séries como: LINEAR, SAZONAL_DIARIA ou SAZONAL_SEMANAL**")
     st.markdown("---")
     st.sidebar.header("🔧 Configurações")
     if os.path.exists(SERIES_FOLDER):
@@ -488,8 +480,6 @@ def main():
                     emoji_map = {
                         'SAZONAL_DIARIA': '🌅',
                         'SAZONAL_SEMANAL': '📅',
-                        'SAZONAL_MISTA': '🔄',
-                        'SAZONAL_FRACA': '🔸',
                         'LINEAR': '📈'
                     }
                     emoji = emoji_map.get(classification, '❓')
@@ -523,7 +513,7 @@ def main():
                     status_text.text('Detectando frequência...')
                     progress_bar.progress(30)
                     freq_code, freq_desc = analyzer.detect_frequency()
-                    status_text.text('Analisando padrões sazonais avançados...')
+                    status_text.text('Analisando padrões sazonais...')
                     progress_bar.progress(45)
                     seasonality_results = analyzer.advanced_seasonality_detection()
                     status_text.text('Realizando decomposição sazonal...')
@@ -532,8 +522,6 @@ def main():
                     status_text.text('Detectando saltos...')
                     progress_bar.progress(75)
                     jump_count, threshold, jumps = analyzer.detect_jumps(threshold_std_single)
-                    status_text.text('Testando estacionariedade...')
-                    progress_bar.progress(85)
                     status_text.text('Gerando visualizações...')
                     progress_bar.progress(95)
                     plots = analyzer.generate_plots()
