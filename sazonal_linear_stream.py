@@ -29,9 +29,17 @@ class TimeSeriesAnalyzer:
     def load_data(self, show_message=True):
         try:
             self.df = pd.read_csv(self.file_path, sep=None, engine='python')
+
+            rename_map = {}
+            if 'Timestamp' in self.df.columns:
+                rename_map['Timestamp'] = 'datetime'
+            if 'Valor' in self.df.columns:
+                rename_map['Valor'] = 'value'
+            self.df.rename(columns=rename_map, inplace=True)
+
             if 'datetime' not in self.df.columns or 'value' not in self.df.columns:
                 if show_message:
-                    st.error("O arquivo deve conter as colunas 'datetime' e 'value'")
+                    st.error("O arquivo deve conter as colunas 'Timestamp' e 'Valor'")
                 return False
 
             self.df['datetime'] = pd.to_datetime(self.df['datetime'])
@@ -41,267 +49,8 @@ class TimeSeriesAnalyzer:
             if show_message:
                 file_name = os.path.basename(self.file_path)
                 st.success(f"✅ Dados do arquivo '{file_name}' carregados com sucesso!")
-                
-                col1, col2 = st.columns(2)
-    col1.metric("Assimetria", f"{basic_stats['Assimetria']:.4f}")
-    col2.metric("Curtose", f"{basic_stats['Curtose']:.4f}")
 
-
-def show_decomposition_metrics(decomp_data):
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Variância Sazonal", f"{decomp_data['seasonal_percentage']:.2f}%")
-    col2.metric("Variância de Tendência", f"{decomp_data['trend_percentage']:.2f}%")
-    col3.metric("Variância Residual", f"{decomp_data['residual_percentage']:.2f}%")
-
-
-def show_jumps(jump_count, jumps):
-    if jump_count > 0:
-        st.warning(f"⚠️ Foram detectados {jump_count} saltos significativos na série!")
-        if len(jumps) > 0:
-            st.subheader("Maiores Saltos Detectados")
-            sorted_jumps = jumps.abs().sort_values(ascending=False).head(5)
-            jump_data = [{
-                'Data': date.strftime('%Y-%m-%d %H:%M'),
-                'Direção': "↑ Aumento" if jumps[date] > 0 else "↓ Diminuição",
-                'Magnitude': f"{abs(jumps[date]):.4f}"
-            } for date in sorted_jumps.index]
-            st.dataframe(pd.DataFrame(jump_data), use_container_width=True)
-
-
-def show_download(selected_file, seasonality_results, freq_desc, jump_count, basic_stats):
-    classification = seasonality_results['classification']
-    season_type = seasonality_results['season_type']
-    
-    daily_var = seasonality_results.get('daily_test', {}).get('variance_explained', 0)
-    weekly_var = seasonality_results.get('weekly_test', {}).get('variance_explained', 0)
-    monthly_var = seasonality_results.get('monthly_test', {}).get('variance_explained', 0)
-    
-    results_summary = {
-        'arquivo': selected_file,
-        'classificacao': classification,
-        'tipo_sazonalidade': season_type,
-        'variancia_sazonal_diaria': daily_var,
-        'variancia_sazonal_semanal': weekly_var,
-        'variancia_sazonal_mensal': monthly_var,
-        'frequencia': freq_desc,
-        'saltos_detectados': jump_count,
-        'media': basic_stats['Média'],
-        'desvio_padrao': basic_stats['Desvio Padrão'],
-    }
-    
-    results_df = pd.DataFrame([results_summary])
-    csv_results = results_df.to_csv(index=False)
-    
-    st.download_button(
-        label="📊 Download Resumo da Análise (CSV)",
-        data=csv_results,
-        file_name=f"analise_{selected_file.replace('.csv', '')}_resumo.csv",
-        mime="text/csv"
-    )
-
-
-def batch_analyze_all(threshold_std: float = 3.0):
-    series_folder = "series_temporais"
-    all_results = []
-    csv_files = [f for f in os.listdir(series_folder) if f.endswith(".csv")]
-    
-    progress_bar = st.progress(0)
-    step = 100 / len(csv_files) if csv_files else 100
-    status_text = st.empty()
-    
-    for idx, file_name in enumerate(csv_files, start=1):
-        status_text.text(f"Analisando {file_name} ({idx}/{len(csv_files)})...")
-        
-        file_path = os.path.join(series_folder, file_name)
-        analyzer = TimeSeriesAnalyzer(file_path)
-        
-        if not analyzer.load_data(show_message=False):
-            continue
-            
-        analyzer.basic_statistics()
-        analyzer.detect_frequency()
-        
-        seasonality_results = analyzer.advanced_seasonality_detection()
-        
-        analyzer.seasonal_decomposition()
-        analyzer.detect_jumps(threshold_std)
-        
-        decomp = analyzer.analysis_results.get("decomposition", {})
-        stat = analyzer.analysis_results.get("stationarity", {})
-        basic = analyzer.analysis_results.get("basic_stats", {})
-        jumps = analyzer.analysis_results.get("jumps", {})
-        
-        daily_var = seasonality_results.get('daily_test', {}).get('variance_explained', 0)
-        weekly_var = seasonality_results.get('weekly_test', {}).get('variance_explained', 0)
-        monthly_var = seasonality_results.get('monthly_test', {}).get('variance_explained', 0)
-        
-        all_results.append({
-            "arquivo": file_name,
-            "classificacao": seasonality_results.get('classification', 'N/A'),
-            "tipo_sazonalidade": seasonality_results.get('season_type', 'N/A'),
-            "variancia_sazonal_diaria": daily_var,
-            "variancia_sazonal_semanal": weekly_var,
-            "variancia_sazonal_mensal": monthly_var,
-            "variancia_sazonal_maxima": max(daily_var, weekly_var, monthly_var),
-            "frequencia": analyzer.analysis_results.get("frequency", {}).get("description", ""),
-            "saltos_detectados": jumps.get("count", 0),
-            "media": basic.get("Média", np.nan),
-            "desvio_padrao": basic.get("Desvio Padrão", np.nan),
-        })
-        
-        progress_bar.progress(min(int(idx * step), 100))
-    
-    progress_bar.empty()
-    status_text.text("✅ Análise em lote concluída!")
-    
-    df_results = pd.DataFrame(all_results)
-    classification_counts = df_results['classificacao'].value_counts().to_dict()
-    
-    return df_results, classification_counts
-
-
-def main():
-    st.title("📈 Análise Avançada de Séries Temporais com Detecção de Sazonalidade")
-    st.markdown("**Sistema aprimorado para detectar padrões sazonais diários, semanais e mensais**")
-    st.markdown("---")
-    
-    st.sidebar.header("🔧 Configurações")
-    
-    series_folder = "series_temporais"
-    
-    if os.path.exists(series_folder):
-        csv_files = [f for f in os.listdir(series_folder) if f.endswith('.csv')]
-        
-        if csv_files:
-            st.sidebar.markdown("---")
-            st.sidebar.subheader("🚀 Processamento em Lote")
-            
-            threshold_std_batch = st.sidebar.slider(
-                "Threshold para detecção de saltos (desvios padrão) - Lote:",
-                min_value=1.0, max_value=5.0, value=3.0, step=0.1, key="threshold_batch"
-            )
-            
-            if st.sidebar.button("Analisar TODOS os arquivos", type="primary"):
-                results_df, summary_counts = batch_analyze_all(threshold_std_batch)
-                
-                st.header("📑 Resumo Consolidado")
-                st.dataframe(results_df, use_container_width=True)
-                
-                st.subheader("📊 Resumo Geral de Classificação")
-                for classification, count in summary_counts.items():
-                    emoji_map = {
-                        'SAZONAL_DIARIA': '🌅',
-                        'SAZONAL_SEMANAL': '📅', 
-                        'SAZONAL_MENSAL': '📆',
-                        'SAZONAL_MISTA': '🔄',
-                        'SAZONAL_FRACA': '🔸',
-                        'LINEAR': '📈'
-                    }
-                    emoji = emoji_map.get(classification, '❓')
-                    st.write(f"{emoji} {classification.replace('_', ' ')}: {count}")
-                
-                csv_data = results_df.to_csv(index=False)
-                st.download_button(
-                    "💾 Download Consolidado (CSV)",
-                    csv_data, "analise_consolidada.csv", "text/csv"
-                )
-            
-            selected_file = st.sidebar.selectbox(
-                "Escolha uma série temporal:",
-                csv_files,
-                help="Selecione um arquivo CSV da pasta series_temporais"
-            )
-            
-            file_path = os.path.join(series_folder, selected_file)
-            
-            st.sidebar.header("⚙️ Parâmetros de Análise")
-            threshold_std_single = st.sidebar.slider(
-                "Threshold para detecção de saltos (desvios padrão) - Individual:",
-                min_value=1.0, max_value=5.0, value=3.0, step=0.1, key="threshold_single"
-            )
-            
-            if st.sidebar.button("🚀 Executar Análise", type="primary"):
-                analyzer = TimeSeriesAnalyzer(file_path)
-                
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                status_text.text('Carregando dados...')
-                progress_bar.progress(10)
-                
-                if analyzer.load_data():
-                    status_text.text('Calculando estatísticas básicas...')
-                    progress_bar.progress(20)
-                    basic_stats = analyzer.basic_statistics()
-                    
-                    status_text.text('Detectando frequência...')
-                    progress_bar.progress(30)
-                    freq_code, freq_desc = analyzer.detect_frequency()
-                    
-                    status_text.text('Analisando padrões sazonais avançados...')
-                    progress_bar.progress(45)
-                    seasonality_results = analyzer.advanced_seasonality_detection()
-                    
-                    status_text.text('Realizando decomposição sazonal...')
-                    progress_bar.progress(60)
-                    analyzer.seasonal_decomposition()
-                    
-                    status_text.text('Detectando saltos...')
-                    progress_bar.progress(75)
-                    jump_count, threshold, jumps = analyzer.detect_jumps(threshold_std_single)
-                    
-                    status_text.text('Testando estacionariedade...')
-                    progress_bar.progress(85)
-                    
-                    status_text.text('Gerando visualizações...')
-                    progress_bar.progress(95)
-                    plots = analyzer.generate_plots()
-                    
-                    progress_bar.progress(100)
-                    status_text.text('✅ Análise concluída!')
-                    progress_bar.empty()
-                    status_text.empty()
-                    
-                    st.header("🎯 Resumo Executivo")
-                    show_summary(analyzer, basic_stats, freq_desc, jump_count, seasonality_results)
-                    
-                    show_seasonality_results(seasonality_results)
-                    
-                    st.header("📊 Estatísticas Básicas")
-                    show_basic_stats(basic_stats)
-                    
-                    st.header("📈 Visualizações")
-                    st.subheader("Série Temporal Original")
-                    st.plotly_chart(plots['original'], use_container_width=True)
-                    
-                    st.subheader("Análise da Distribuição")
-                    st.plotly_chart(plots['distribution'], use_container_width=True)
-                    
-                    if 'decomposition' in plots:
-                        st.subheader("Decomposição Sazonal")
-                        st.plotly_chart(plots['decomposition'], use_container_width=True)
-                        show_decomposition_metrics(analyzer.analysis_results['decomposition'])
-                    
-                    if 'patterns' in plots:
-                        st.subheader("Padrões Sazonais")
-                        st.plotly_chart(plots['patterns'], use_container_width=True)
-                    
-                    st.subheader("Detecção de Saltos/Outliers")
-                    st.plotly_chart(plots['jumps'], use_container_width=True)
-                    show_jumps(jump_count, jumps)
-                    
-                    st.header("💾 Download dos Resultados")
-                    show_download(selected_file, seasonality_results, freq_desc, 
-                                jump_count, basic_stats)
-        else:
-            st.error("❌ Nenhum arquivo CSV encontrado na pasta 'series_temporais'")
-    else:
-        st.error("❌ Pasta 'series_temporais' não encontrada")
-        st.info("💡 Certifique-se de que a pasta 'series_temporais' existe e contém arquivos CSV com colunas 'datetime' e 'value'")
-
-
-if __name__ == "__main__":
-    main(), col3 = st.columns(3)
+                col1, col2, col3 = st.columns(3)
                 col1.metric("Período Inicial", self.df.index.min().strftime('%Y-%m-%d'))
                 col2.metric("Período Final", self.df.index.max().strftime('%Y-%m-%d'))
                 col3.metric("Total de Observações", len(self.df))
@@ -377,6 +126,7 @@ if __name__ == "__main__":
                     ssb = ((temp_df_with_hour_mean['hour_mean'] - overall_mean) ** 2).sum()
                     
                     sst = ((temp_df['value'] - overall_mean) ** 2).sum()
+                    
                     hourly_variance_explained = (ssb / sst) * 100 if sst > 0 else 0
                     
                     seasonality_tests['daily'] = {
@@ -410,6 +160,7 @@ if __name__ == "__main__":
                     ssb_weekly = ((temp_df_with_day_mean['day_mean'] - overall_mean) ** 2).sum()
                     
                     sst_weekly = ((temp_df['value'] - overall_mean) ** 2).sum()
+                    
                     weekly_variance_explained = (ssb_weekly / sst_weekly) * 100 if sst_weekly > 0 else 0
                     
                     business_days_values = temp_df[temp_df['is_business_day']]['value']
@@ -435,7 +186,7 @@ if __name__ == "__main__":
             else:
                 seasonality_tests['weekly'] = {'has_pattern': False, 'reason': 'Dados insuficientes'}
 
-        # 3. TESTE DE SAZONALIDADE MENSAL (por mês)
+        # 3. TESTE DE SAZONALIDADE MENSAL (NOVO)
         if temp_df['month'].nunique() > 1:
             monthly_groups = [group['value'].values for name, group in temp_df.groupby('month') if len(group) >= 2]
             
@@ -451,6 +202,7 @@ if __name__ == "__main__":
                     ssb_monthly = ((temp_df_with_month_mean['month_mean'] - overall_mean) ** 2).sum()
                     
                     sst_monthly = ((temp_df['value'] - overall_mean) ** 2).sum()
+                    
                     monthly_variance_explained = (ssb_monthly / sst_monthly) * 100 if sst_monthly > 0 else 0
                     
                     seasonality_tests['monthly'] = {
@@ -468,7 +220,7 @@ if __name__ == "__main__":
             else:
                 seasonality_tests['monthly'] = {'has_pattern': False, 'reason': 'Dados insuficientes'}
 
-        # 4. CLASSIFICAÇÃO FINAL DA SAZONALIDADE
+        # 4. CLASSIFICAÇÃO FINAL DA SAZONALIDADE (ATUALIZADA)
         daily_strong = seasonality_tests.get('daily', {}).get('variance_explained', 0) > 15
         weekly_strong = seasonality_tests.get('weekly', {}).get('variance_explained', 0) > 10
         monthly_strong = seasonality_tests.get('monthly', {}).get('variance_explained', 0) > 10
@@ -477,34 +229,27 @@ if __name__ == "__main__":
         weekly_significant = seasonality_tests.get('weekly', {}).get('has_pattern', False)
         monthly_significant = seasonality_tests.get('monthly', {}).get('has_pattern', False)
         
-        # Contagem de padrões fortes
-        strong_patterns = sum([daily_strong and daily_significant, 
-                              weekly_strong and weekly_significant, 
-                              monthly_strong and monthly_significant])
+        # Lógica de classificação refinada com sazonalidade mensal
+        patterns_detected = []
+        if daily_significant and daily_strong:
+            patterns_detected.append('diária')
+        if weekly_significant and weekly_strong:
+            patterns_detected.append('semanal')
+        if monthly_significant and monthly_strong:
+            patterns_detected.append('mensal')
         
-        # Lógica de classificação refinada
-        if strong_patterns >= 2:
-            patterns = []
-            if daily_strong and daily_significant:
-                patterns.append("diária")
-            if weekly_strong and weekly_significant:
-                patterns.append("semanal")
-            if monthly_strong and monthly_significant:
-                patterns.append("mensal")
+        if len(patterns_detected) >= 2:
             main_seasonality = "SAZONAL_MISTA"
-            season_type = " + ".join(patterns)
-        elif daily_significant and daily_strong:
+            season_type = " + ".join(patterns_detected)
+        elif 'diária' in patterns_detected:
             main_seasonality = "SAZONAL_DIARIA"
             season_type = "diária"
-        elif weekly_significant and weekly_strong:
+        elif 'semanal' in patterns_detected:
             main_seasonality = "SAZONAL_SEMANAL"
             season_type = "semanal"
-        elif monthly_significant and monthly_strong:
+        elif 'mensal' in patterns_detected:
             main_seasonality = "SAZONAL_MENSAL"
             season_type = "mensal"
-        elif daily_significant or weekly_significant or monthly_significant:
-            main_seasonality = "SAZONAL_FRACA"
-            season_type = "fraca"
         else:
             main_seasonality = "LINEAR"
             season_type = "não sazonal"
@@ -529,7 +274,7 @@ if __name__ == "__main__":
         
         if temp_df['day_of_week'].nunique() > 1:
             patterns['weekly'] = temp_df.groupby('day_of_week')['value'].agg(['mean', 'std', 'count'])
-        
+            
         if temp_df.index.month.nunique() > 1:
             patterns['monthly'] = temp_df.groupby(temp_df.index.month)['value'].agg(['mean', 'std', 'count'])
             
@@ -555,7 +300,7 @@ if __name__ == "__main__":
                     period = 7
                 else:
                     period = max(2, n // 10)
-            
+                    
             elif seasonality_info['classification'] == 'SAZONAL_MENSAL':
                 if freq_seconds <= 86400:
                     period = 30
@@ -568,7 +313,7 @@ if __name__ == "__main__":
                 elif freq_seconds <= 86400:
                     period = 7
                 else:
-                    period = 30
+                    period = 12
             else:
                 period = max(2, min(n // 4, 12))
 
@@ -654,16 +399,14 @@ if __name__ == "__main__":
             
             if available_patterns:
                 n_plots = len(available_patterns)
-                titles = []
-                for k in available_patterns:
-                    if k == 'hourly':
-                        titles.append('Por Hora')
-                    elif k == 'weekly':
-                        titles.append('Por Dia da Semana')
-                    elif k == 'monthly':
-                        titles.append('Por Mês')
+                titles = {
+                    'hourly': 'Por Hora',
+                    'weekly': 'Por Dia da Semana',
+                    'monthly': 'Por Mês'
+                }
+                subplot_titles = [titles[k] for k in available_patterns]
                 
-                fig4 = make_subplots(rows=1, cols=n_plots, subplot_titles=titles)
+                fig4 = make_subplots(rows=1, cols=n_plots, subplot_titles=subplot_titles)
                 
                 for idx, pattern_type in enumerate(available_patterns, 1):
                     if pattern_type == 'hourly':
@@ -716,7 +459,7 @@ if __name__ == "__main__":
 def show_seasonality_results(seasonality_results):
     """Exibe os resultados detalhados da análise de sazonalidade"""
     
-    col1, col2  = st.columns(2)
+    col1, col2 = st.columns(2)
     
     classification = seasonality_results['classification']
     season_type = seasonality_results['season_type']
@@ -726,7 +469,6 @@ def show_seasonality_results(seasonality_results):
         'SAZONAL_SEMANAL': '🔵', 
         'SAZONAL_MENSAL': '🟣',
         'SAZONAL_MISTA': '🟡',
-        'SAZONAL_FRACA': '🟠',
         'LINEAR': '⚪'
     }
     
@@ -750,8 +492,6 @@ def show_seasonality_results(seasonality_results):
             st.write(f"• Vale: {daily_test.get('low_hour', 'N/A')}h")
         else:
             st.info("ℹ️ Sem padrão diário")
-            if 'error' in daily_test:
-                st.error(f"Erro: {daily_test['error']}")
     
     # Teste semanal  
     with col2:
@@ -770,13 +510,10 @@ def show_seasonality_results(seasonality_results):
             
             st.write(f"• Pico: {peak_day}")
             st.write(f"• Vale: {low_day}")
-            st.write(f"• Dif. úteis/fds: {weekly_test.get('weekday_weekend_diff', 0):.1f}%")
         else:
             st.info("ℹ️ Sem padrão semanal")
-            if 'error' in weekly_test:
-                st.error(f"Erro: {weekly_test['error']}")
     
-    # Teste mensal
+    # Teste mensal (NOVO)
     with col3:
         st.markdown("**📆 Sazonalidade Mensal**")
         monthly_test = seasonality_results.get('monthly_test', {})
@@ -795,8 +532,6 @@ def show_seasonality_results(seasonality_results):
             st.write(f"• Vale: {low_month}")
         else:
             st.info("ℹ️ Sem padrão mensal")
-            if 'error' in monthly_test:
-                st.error(f"Erro: {monthly_test['error']}")
 
 
 def show_summary(analyzer, basic_stats, freq_desc, jump_count, seasonality_results):
@@ -837,4 +572,265 @@ def show_basic_stats(basic_stats):
     col2.subheader("Medidas de Dispersão")  
     col2.dataframe(disp_df, use_container_width=True)
     
-    col1, col2
+    col1, col2 = st.columns(2)
+    col1.metric("Assimetria", f"{basic_stats['Assimetria']:.4f}")
+    col2.metric("Curtose", f"{basic_stats['Curtose']:.4f}")
+
+
+def show_decomposition_metrics(decomp_data):
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Variância Sazonal", f"{decomp_data['seasonal_percentage']:.2f}%")
+    col2.metric("Variância de Tendência", f"{decomp_data['trend_percentage']:.2f}%")
+    col3.metric("Variância Residual", f"{decomp_data['residual_percentage']:.2f}%")
+
+
+def show_jumps(jump_count, jumps):
+    if jump_count > 0:
+        st.warning(f"⚠️ Foram detectados {jump_count} saltos significativos na série!")
+        if len(jumps) > 0:
+            st.subheader("Maiores Saltos Detectados")
+            sorted_jumps = jumps.abs().sort_values(ascending=False).head(5)
+            jump_data = [{
+                'Data': date.strftime('%Y-%m-%d %H:%M'),
+                'Direção': "↑ Aumento" if jumps[date] > 0 else "↓ Diminuição",
+                'Magnitude': f"{abs(jumps[date]):.4f}"
+            } for date in sorted_jumps.index]
+            st.dataframe(pd.DataFrame(jump_data), use_container_width=True)
+
+
+def show_download(selected_file, seasonality_results, freq_desc, jump_count, basic_stats):
+    classification = seasonality_results['classification']
+    season_type = seasonality_results['season_type']
+    
+    daily_var = seasonality_results.get('daily_test', {}).get('variance_explained', 0)
+    weekly_var = seasonality_results.get('weekly_test', {}).get('variance_explained', 0)
+    monthly_var = seasonality_results.get('monthly_test', {}).get('variance_explained', 0)
+    
+    results_summary = {
+        'arquivo': selected_file,
+        'classificacao': classification,
+        'tipo_sazonalidade': season_type,
+        'variancia_sazonal_diaria': daily_var,
+        'variancia_sazonal_semanal': weekly_var,
+        'variancia_sazonal_mensal': monthly_var,
+        'frequencia': freq_desc,
+        'saltos_detectados': jump_count,
+        'media': basic_stats['Média'],
+        'desvio_padrao': basic_stats['Desvio Padrão'],
+    }
+    
+    results_df = pd.DataFrame([results_summary])
+    csv_results = results_df.to_csv(index=False)
+    
+    st.download_button(
+        label="📊 Download Resumo da Análise (CSV)",
+        data=csv_results,
+        file_name=f"analise_{selected_file.replace('.csv', '')}_resumo.csv",
+        mime="text/csv"
+    )
+
+
+def extract_sigla_servico(file_name):
+    try:
+        sigla = file_name.split("sigla-")[1].split("_")[0] if "sigla-" in file_name else "N/A"
+        servico = file_name.split("servicename-")[1].rsplit(".csv", 1)[0] if "servicename-" in file_name else "N/A"
+        return sigla, servico
+    except Exception:
+        return "N/A", "N/A"
+
+
+def batch_analyze_all(threshold_std: float = 3.0):
+    series_folder = "series_temporais/series_manhatam/series_temporais_tier_0"
+    all_results = []
+    csv_files = [f for f in os.listdir(series_folder) if f.endswith(".csv")]
+    
+    progress_bar = st.progress(0)
+    step = 100 / len(csv_files) if csv_files else 100
+    status_text = st.empty()
+    
+    for idx, file_name in enumerate(csv_files, start=1):
+        status_text.text(f"Analisando {file_name} ({idx}/{len(csv_files)})...")
+        
+        file_path = os.path.join(series_folder, file_name)
+        analyzer = TimeSeriesAnalyzer(file_path)
+        
+        if not analyzer.load_data(show_message=False):
+            continue
+            
+        analyzer.basic_statistics()
+        analyzer.detect_frequency()
+        
+        seasonality_results = analyzer.advanced_seasonality_detection()
+        
+        analyzer.seasonal_decomposition()
+        analyzer.detect_jumps(threshold_std)
+        
+        decomp = analyzer.analysis_results.get("decomposition", {})
+        basic = analyzer.analysis_results.get("basic_stats", {})
+        jumps = analyzer.analysis_results.get("jumps", {})
+        
+        daily_var = seasonality_results.get('daily_test', {}).get('variance_explained', 0)
+        weekly_var = seasonality_results.get('weekly_test', {}).get('variance_explained', 0)
+        monthly_var = seasonality_results.get('monthly_test', {}).get('variance_explained', 0)
+        
+        all_results.append({
+            "sigla": extract_sigla_servico(file_name)[0],
+            "servico": extract_sigla_servico(file_name)[1],  
+            "classificacao": seasonality_results.get('classification', 'N/A'),
+            "variancia_sazonal_diaria": daily_var,
+            "variancia_sazonal_semanal": weekly_var,
+            "variancia_sazonal_mensal": monthly_var,
+            "saltos_detectados": jumps.get("count", 0),
+            "media": basic.get("Média", np.nan),
+            "desvio_padrao": basic.get("Desvio Padrão", np.nan),
+        })
+        
+        progress_bar.progress(min(int(idx * step), 100))
+    
+    progress_bar.empty()
+    status_text.text("✅ Análise em lote concluída!")
+    
+    df_results = pd.DataFrame(all_results)
+    classification_counts = df_results['classificacao'].value_counts().to_dict()
+    
+    return df_results, classification_counts
+
+
+def main():
+    st.title("📈 Análise Avançada de Séries Temporais com Detecção de Sazonalidade")
+    st.markdown("**Sistema aprimorado para detectar padrões sazonais diários, semanais e mensais**")
+    st.markdown("---")
+    
+    st.sidebar.header("🔧 Configurações")
+    
+    series_folder = "series_temporais/series_manhatam/series_temporais_tier_0"
+    
+    if os.path.exists(series_folder):
+        csv_files = [f for f in os.listdir(series_folder) if f.endswith('.csv')]
+        
+        if csv_files:
+            st.sidebar.markdown("---")
+            st.sidebar.subheader("🚀 Processamento em Lote")
+            
+            threshold_std_batch = st.sidebar.slider(
+                "Threshold para detecção de saltos (desvios padrão) - Lote:",
+                min_value=1.0, max_value=5.0, value=3.0, step=0.1, key="threshold_batch"
+            )
+            
+            if st.sidebar.button("Analisar TODOS os arquivos", type="primary"):
+                results_df, summary_counts = batch_analyze_all(threshold_std_batch)
+                
+                st.header("📑 Resumo Consolidado")
+                st.dataframe(results_df, use_container_width=True)
+                
+                st.subheader("📊 Resumo Geral de Classificação")
+                for classification, count in summary_counts.items():
+                    emoji_map = {
+                        'SAZONAL_DIARIA': '🌅',
+                        'SAZONAL_SEMANAL': '📅', 
+                        'SAZONAL_MENSAL': '🟣',
+                        'SAZONAL_MISTA': '🔄',
+                        'LINEAR': '📈'
+                    }
+                    emoji = emoji_map.get(classification, '❓')
+                    st.write(f"{emoji} {classification.replace('_', ' ')}: {count}")
+                
+                csv_data = results_df.to_csv(index=False)
+                st.download_button(
+                    "💾 Download Consolidado (CSV)",
+                    csv_data, "analise_consolidada.csv", "text/csv"
+                )
+            
+            selected_file = st.sidebar.selectbox(
+                "Escolha uma série temporal:",
+                csv_files,
+                help="Selecione um arquivo CSV da pasta series_temporais"
+            )
+            
+            file_path = os.path.join(series_folder, selected_file)
+            
+            st.sidebar.header("⚙️ Parâmetros de Análise")
+            threshold_std_single = st.sidebar.slider(
+                "Threshold para detecção de saltos (desvios padrão) - Individual:",
+                min_value=1.0, max_value=5.0, value=3.0, step=0.1, key="threshold_single"
+            )
+            
+            if st.sidebar.button("🚀 Executar Análise", type="primary"):
+                analyzer = TimeSeriesAnalyzer(file_path)
+                
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                status_text.text('Carregando dados...')
+                progress_bar.progress(10)
+                
+                if analyzer.load_data():
+                    status_text.text('Calculando estatísticas básicas...')
+                    progress_bar.progress(20)
+                    basic_stats = analyzer.basic_statistics()
+                    
+                    status_text.text('Detectando frequência...')
+                    progress_bar.progress(30)
+                    freq_code, freq_desc = analyzer.detect_frequency()
+                    
+                    status_text.text('Analisando sazonalidade...')
+                    progress_bar.progress(50)
+                    seasonality_results = analyzer.advanced_seasonality_detection()
+                    
+                    status_text.text('Realizando decomposição sazonal...')
+                    progress_bar.progress(60)
+                    analyzer.seasonal_decomposition()
+                    
+                    status_text.text('Detectando saltos...')
+                    progress_bar.progress(75)
+                    jump_count, threshold, jumps = analyzer.detect_jumps(threshold_std_single)
+                    
+                    status_text.text('Gerando visualizações...')
+                    progress_bar.progress(95)
+                    plots = analyzer.generate_plots()
+                    
+                    progress_bar.progress(100)
+                    status_text.text('✅ Análise concluída!')
+                    progress_bar.empty()
+                    status_text.empty()
+                    
+                    st.header("🎯 Resumo Executivo")
+                    show_summary(analyzer, basic_stats, freq_desc, jump_count, seasonality_results)
+                    
+                    show_seasonality_results(seasonality_results)
+                    
+                    st.header("📊 Estatísticas Básicas")
+                    show_basic_stats(basic_stats)
+                    
+                    st.header("📈 Visualizações")
+                    st.subheader("Série Temporal Original")
+                    st.plotly_chart(plots['original'], use_container_width=True)
+                    
+                    st.subheader("Análise da Distribuição")
+                    st.plotly_chart(plots['distribution'], use_container_width=True)
+                    
+                    if 'decomposition' in plots:
+                        st.subheader("Decomposição Sazonal")
+                        st.plotly_chart(plots['decomposition'], use_container_width=True)
+                        show_decomposition_metrics(analyzer.analysis_results['decomposition'])
+                    
+                    if 'patterns' in plots:
+                        st.subheader("Padrões Sazonais")
+                        st.plotly_chart(plots['patterns'], use_container_width=True)
+                    
+                    st.subheader("Detecção de Saltos/Outliers")
+                    st.plotly_chart(plots['jumps'], use_container_width=True)
+                    show_jumps(jump_count, jumps)
+                    
+                    st.header("💾 Download dos Resultados")
+                    show_download(selected_file, seasonality_results, freq_desc, 
+                                jump_count, basic_stats)
+        else:
+            st.error("❌ Nenhum arquivo CSV encontrado na pasta")
+    else:
+        st.error("❌ Pasta não encontrada")
+        st.info("💡 Certifique-se de que a pasta existe e contém arquivos CSV")
+
+
+if __name__ == "__main__":
+    main()
