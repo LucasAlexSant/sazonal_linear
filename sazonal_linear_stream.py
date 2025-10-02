@@ -105,6 +105,7 @@ class TimeSeriesAnalyzer:
         temp_df['hour'] = temp_df.index.hour
         temp_df['day_of_week'] = temp_df.index.dayofweek
         temp_df['month'] = temp_df.index.month
+        temp_df['week_of_month'] = (temp_df.index.day - 1) // 7 + 1  # Semana do mês (1-5)
         temp_df['is_weekend'] = temp_df['day_of_week'].isin([5, 6])
         temp_df['is_business_day'] = ~temp_df['is_weekend']
         
@@ -186,19 +187,19 @@ class TimeSeriesAnalyzer:
             else:
                 seasonality_tests['weekly'] = {'has_pattern': False, 'reason': 'Dados insuficientes'}
 
-        # 3. TESTE DE SAZONALIDADE MENSAL (NOVO)
-        if temp_df['month'].nunique() > 1:
-            monthly_groups = [group['value'].values for name, group in temp_df.groupby('month') if len(group) >= 2]
+        # 3. TESTE DE SAZONALIDADE MENSAL (POR SEMANA DO MÊS)
+        if temp_df['week_of_month'].nunique() > 1:
+            monthly_groups = [group['value'].values for name, group in temp_df.groupby('week_of_month') if len(group) >= 2]
             
             if len(monthly_groups) >= 3:
                 try:
                     f_stat_monthly, p_value_monthly = f_oneway(*monthly_groups)
                     
-                    monthly_means = temp_df.groupby('month')['value'].mean()
+                    monthly_means = temp_df.groupby('week_of_month')['value'].mean()
                     overall_mean = temp_df['value'].mean()
                     
                     temp_df_with_month_mean = temp_df.copy()
-                    temp_df_with_month_mean['month_mean'] = temp_df_with_month_mean['month'].map(monthly_means)
+                    temp_df_with_month_mean['month_mean'] = temp_df_with_month_mean['week_of_month'].map(monthly_means)
                     ssb_monthly = ((temp_df_with_month_mean['month_mean'] - overall_mean) ** 2).sum()
                     
                     sst_monthly = ((temp_df['value'] - overall_mean) ** 2).sum()
@@ -210,9 +211,9 @@ class TimeSeriesAnalyzer:
                         'p_value': p_value_monthly,
                         'f_statistic': f_stat_monthly,
                         'variance_explained': monthly_variance_explained,
-                        'peak_month': monthly_means.idxmax(),
-                        'low_month': monthly_means.idxmin(),
-                        'month_range': monthly_means.max() - monthly_means.min()
+                        'peak_week': monthly_means.idxmax(),
+                        'low_week': monthly_means.idxmin(),
+                        'week_range': monthly_means.max() - monthly_means.min()
                     }
                     
                 except Exception as e:
@@ -275,8 +276,8 @@ class TimeSeriesAnalyzer:
         if temp_df['day_of_week'].nunique() > 1:
             patterns['weekly'] = temp_df.groupby('day_of_week')['value'].agg(['mean', 'std', 'count'])
             
-        if temp_df.index.month.nunique() > 1:
-            patterns['monthly'] = temp_df.groupby(temp_df.index.month)['value'].agg(['mean', 'std', 'count'])
+        if temp_df['week_of_month'].nunique() > 1:
+            patterns['monthly'] = temp_df.groupby('week_of_month')['value'].agg(['mean', 'std', 'count'])
             
         return patterns
 
@@ -402,7 +403,7 @@ class TimeSeriesAnalyzer:
                 titles = {
                     'hourly': 'Por Hora',
                     'weekly': 'Por Dia da Semana',
-                    'monthly': 'Por Mês'
+                    'monthly': 'Por Semana do Mês'
                 }
                 subplot_titles = [titles[k] for k in available_patterns]
                 
@@ -427,11 +428,10 @@ class TimeSeriesAnalyzer:
                         )
                     
                     elif pattern_type == 'monthly':
-                        months = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 
-                                 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez']
-                        y_vals = [patterns['monthly'].loc[m, 'mean'] if m in patterns['monthly'].index else 0 for m in range(1, 13)]
+                        weeks = ['1ª Semana', '2ª Semana', '3ª Semana', '4ª Semana', '5ª Semana']
+                        y_vals = [patterns['monthly'].loc[w, 'mean'] if w in patterns['monthly'].index else 0 for w in range(1, 6)]
                         fig4.add_trace(
-                            go.Bar(x=months, y=y_vals, name='Média por Mês', marker_color='lightskyblue'),
+                            go.Bar(x=weeks, y=y_vals, name='Média por Semana do Mês', marker_color='lightskyblue'),
                             row=1, col=idx
                         )
                 
@@ -513,7 +513,7 @@ def show_seasonality_results(seasonality_results):
         else:
             st.info("ℹ️ Sem padrão semanal")
     
-    # Teste mensal (NOVO)
+    # Teste mensal (ATUALIZADO)
     with col3:
         st.markdown("**📆 Sazonalidade Mensal**")
         monthly_test = seasonality_results.get('monthly_test', {})
@@ -523,13 +523,13 @@ def show_seasonality_results(seasonality_results):
             st.write(f"• Variância: {monthly_test.get('variance_explained', 0):.1f}%")
             st.write(f"• P-valor: {monthly_test.get('p_value', 0):.6f}")
             
-            months_map = {1: 'Jan', 2: 'Fev', 3: 'Mar', 4: 'Abr', 5: 'Mai', 6: 'Jun',
-                         7: 'Jul', 8: 'Ago', 9: 'Set', 10: 'Out', 11: 'Nov', 12: 'Dez'}
-            peak_month = months_map.get(monthly_test.get('peak_month'), 'N/A')
-            low_month = months_map.get(monthly_test.get('low_month'), 'N/A')
+            weeks_map = {1: '1ª Semana', 2: '2ª Semana', 3: '3ª Semana', 
+                        4: '4ª Semana', 5: '5ª Semana'}
+            peak_week = weeks_map.get(monthly_test.get('peak_week'), 'N/A')
+            low_week = weeks_map.get(monthly_test.get('low_week'), 'N/A')
             
-            st.write(f"• Pico: {peak_month}")
-            st.write(f"• Vale: {low_month}")
+            st.write(f"• Pico: {peak_week}")
+            st.write(f"• Vale: {low_week}")
         else:
             st.info("ℹ️ Sem padrão mensal")
 
