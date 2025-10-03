@@ -30,6 +30,7 @@ class TimeSeriesAnalyzer:
         try:
             self.df = pd.read_csv(self.file_path, sep=None, engine='python')
 
+            # Padroniza os nomes para manter compatibilidade com o resto do código
             rename_map = {}
             if 'Timestamp' in self.df.columns:
                 rename_map['Timestamp'] = 'datetime'
@@ -60,6 +61,7 @@ class TimeSeriesAnalyzer:
                 st.error(f"❌ Erro ao carregar dados: {e}")
             return False
         return True
+
 
     def basic_statistics(self):
         values = self.df['value']
@@ -104,8 +106,8 @@ class TimeSeriesAnalyzer:
         temp_df = self.df.copy()
         temp_df['hour'] = temp_df.index.hour
         temp_df['day_of_week'] = temp_df.index.dayofweek
+        temp_df['day_of_month'] = temp_df.index.day
         temp_df['month'] = temp_df.index.month
-        temp_df['week_of_month'] = (temp_df.index.day - 1) // 7 + 1  # Semana do mês (1-5)
         temp_df['is_weekend'] = temp_df['day_of_week'].isin([5, 6])
         temp_df['is_business_day'] = ~temp_df['is_weekend']
         
@@ -154,7 +156,6 @@ class TimeSeriesAnalyzer:
                     f_stat_weekly, p_value_weekly = f_oneway(*weekly_groups)
                     
                     weekly_means = temp_df.groupby('day_of_week')['value'].mean()
-                    overall_mean = temp_df['value'].mean()
                     
                     temp_df_with_day_mean = temp_df.copy()
                     temp_df_with_day_mean['day_mean'] = temp_df_with_day_mean['day_of_week'].map(weekly_means)
@@ -187,50 +188,65 @@ class TimeSeriesAnalyzer:
             else:
                 seasonality_tests['weekly'] = {'has_pattern': False, 'reason': 'Dados insuficientes'}
 
-        # 3. TESTE DE SAZONALIDADE MENSAL (POR SEMANA DO MÊS)
-        if temp_df['week_of_month'].nunique() > 1:
-            monthly_groups = [group['value'].values for name, group in temp_df.groupby('week_of_month') if len(group) >= 2]
+        # 3. TESTE DE SAZONALIDADE MENSAL (por dia do mês)
+        if temp_df['day_of_month'].nunique() > 1 and temp_df['month'].nunique() >= 2:
+            # Agrupa por dia do mês (1-31)
+            monthly_groups = [group['value'].values for name, group in temp_df.groupby('day_of_month') if len(group) >= 2]
             
             if len(monthly_groups) >= 3:
                 try:
                     f_stat_monthly, p_value_monthly = f_oneway(*monthly_groups)
                     
-                    monthly_means = temp_df.groupby('week_of_month')['value'].mean()
-                    overall_mean = temp_df['value'].mean()
+                    monthly_means = temp_df.groupby('day_of_month')['value'].mean()
                     
                     temp_df_with_month_mean = temp_df.copy()
-                    temp_df_with_month_mean['month_mean'] = temp_df_with_month_mean['week_of_month'].map(monthly_means)
+                    temp_df_with_month_mean['month_mean'] = temp_df_with_month_mean['day_of_month'].map(monthly_means)
                     ssb_monthly = ((temp_df_with_month_mean['month_mean'] - overall_mean) ** 2).sum()
                     
                     sst_monthly = ((temp_df['value'] - overall_mean) ** 2).sum()
                     
                     monthly_variance_explained = (ssb_monthly / sst_monthly) * 100 if sst_monthly > 0 else 0
                     
+                    # Análise de início vs final do mês
+                    inicio_mes = temp_df[temp_df['day_of_month'] <= 10]['value'].mean()
+                    meio_mes = temp_df[(temp_df['day_of_month'] > 10) & (temp_df['day_of_month'] <= 20)]['value'].mean()
+                    fim_mes = temp_df[temp_df['day_of_month'] > 20]['value'].mean()
+                    
                     seasonality_tests['monthly'] = {
                         'has_pattern': p_value_monthly < 0.05,
                         'p_value': p_value_monthly,
                         'f_statistic': f_stat_monthly,
                         'variance_explained': monthly_variance_explained,
-                        'peak_week': monthly_means.idxmax(),
-                        'low_week': monthly_means.idxmin(),
-                        'week_range': monthly_means.max() - monthly_means.min()
+                        'peak_day': int(monthly_means.idxmax()),
+                        'low_day': int(monthly_means.idxmin()),
+                        'day_range': monthly_means.max() - monthly_means.min(),
+                        'inicio_mes_avg': inicio_mes,
+                        'meio_mes_avg': meio_mes,
+                        'fim_mes_avg': fim_mes,
+                        'n_months': temp_df['month'].nunique()
                     }
                     
                 except Exception as e:
                     seasonality_tests['monthly'] = {'has_pattern': False, 'error': str(e)}
             else:
                 seasonality_tests['monthly'] = {'has_pattern': False, 'reason': 'Dados insuficientes'}
+        else:
+            seasonality_tests['monthly'] = {'has_pattern': False, 'reason': 'Menos de 2 meses de dados'}
 
-        # 4. CLASSIFICAÇÃO FINAL DA SAZONALIDADE (ATUALIZADA)
-        daily_strong = seasonality_tests.get('daily', {}).get('variance_explained', 0) > 15
-        weekly_strong = seasonality_tests.get('weekly', {}).get('variance_explained', 0) > 10
-        monthly_strong = seasonality_tests.get('monthly', {}).get('variance_explained', 0) > 10
+        # 4. CLASSIFICAÇÃO FINAL DA SAZONALIDADE
+        daily_var = seasonality_tests.get('daily', {}).get('variance_explained', 0)
+        weekly_var = seasonality_tests.get('weekly', {}).get('variance_explained', 0)
+        monthly_var = seasonality_tests.get('monthly', {}).get('variance_explained', 0)
+        
+        daily_strong = daily_var > 15
+        weekly_strong = weekly_var > 10
+        monthly_strong = monthly_var > 15
         
         daily_significant = seasonality_tests.get('daily', {}).get('has_pattern', False)
         weekly_significant = seasonality_tests.get('weekly', {}).get('has_pattern', False)
         monthly_significant = seasonality_tests.get('monthly', {}).get('has_pattern', False)
         
-        # Lógica de classificação refinada com sazonalidade mensal
+        # Detecta todos os padrões presentes
         patterns_detected = []
         if daily_significant and daily_strong:
             patterns_detected.append('diária')
@@ -239,18 +255,24 @@ class TimeSeriesAnalyzer:
         if monthly_significant and monthly_strong:
             patterns_detected.append('mensal')
         
-        if len(patterns_detected) >= 2:
-            main_seasonality = "SAZONAL_MISTA"
-            season_type = " + ".join(patterns_detected)
-        elif 'diária' in patterns_detected:
-            main_seasonality = "SAZONAL_DIARIA"
-            season_type = "diária"
-        elif 'semanal' in patterns_detected:
-            main_seasonality = "SAZONAL_SEMANAL"
-            season_type = "semanal"
-        elif 'mensal' in patterns_detected:
-            main_seasonality = "SAZONAL_MENSAL"
-            season_type = "mensal"
+        # Classificação principal: escolhe o padrão MAIS FORTE (maior variância explicada)
+        # Tipo de sazonalidade: mostra TODOS os padrões detectados
+        if len(patterns_detected) > 0:
+            # Define classificação baseada no padrão dominante (maior variância)
+            max_variance = max(daily_var, weekly_var, monthly_var)
+            
+            if max_variance == monthly_var and monthly_strong:
+                main_seasonality = "SAZONAL_MENSAL"
+            elif max_variance == daily_var and daily_strong:
+                main_seasonality = "SAZONAL_DIARIA"
+            elif max_variance == weekly_var and weekly_strong:
+                main_seasonality = "SAZONAL_SEMANAL"
+            else:
+                # Fallback: se nenhum for forte o suficiente
+                main_seasonality = "LINEAR"
+            
+            # Tipo mostra todos os padrões detectados
+            season_type = " + ".join(patterns_detected) if len(patterns_detected) > 1 else patterns_detected[0]
         else:
             main_seasonality = "LINEAR"
             season_type = "não sazonal"
@@ -270,14 +292,17 @@ class TimeSeriesAnalyzer:
         """Obtém padrões detalhados para visualização"""
         patterns = {}
         
+        # Padrões por hora
         if temp_df['hour'].nunique() > 1:
             patterns['hourly'] = temp_df.groupby('hour')['value'].agg(['mean', 'std', 'count'])
         
+        # Padrões por dia da semana
         if temp_df['day_of_week'].nunique() > 1:
             patterns['weekly'] = temp_df.groupby('day_of_week')['value'].agg(['mean', 'std', 'count'])
-            
-        if temp_df['week_of_month'].nunique() > 1:
-            patterns['monthly'] = temp_df.groupby('week_of_month')['value'].agg(['mean', 'std', 'count'])
+        
+        # Padrões por dia do mês
+        if temp_df['day_of_month'].nunique() > 1:
+            patterns['monthly'] = temp_df.groupby('day_of_month')['value'].agg(['mean', 'std', 'count'])
             
         return patterns
 
@@ -288,7 +313,14 @@ class TimeSeriesAnalyzer:
             
             seasonality_info = self.seasonality_results
             
-            if seasonality_info['classification'] == 'SAZONAL_DIARIA':
+            if seasonality_info['classification'] == 'SAZONAL_MENSAL':
+                # Para sazonalidade mensal, usar aproximadamente 30 períodos
+                if freq_seconds <= 86400:  # Dados diários ou menos
+                    period = 30
+                else:
+                    period = max(2, n // 10)
+                    
+            elif seasonality_info['classification'] == 'SAZONAL_DIARIA':
                 if freq_seconds <= 3600:
                     period = 24
                 elif freq_seconds <= 86400:
@@ -302,19 +334,11 @@ class TimeSeriesAnalyzer:
                 else:
                     period = max(2, n // 10)
                     
-            elif seasonality_info['classification'] == 'SAZONAL_MENSAL':
-                if freq_seconds <= 86400:
-                    period = 30
-                else:
-                    period = 12
-                    
             elif seasonality_info['classification'] == 'SAZONAL_MISTA':
                 if freq_seconds <= 3600:
                     period = 24
-                elif freq_seconds <= 86400:
-                    period = 7
                 else:
-                    period = 12
+                    period = 7
             else:
                 period = max(2, min(n // 4, 12))
 
@@ -371,16 +395,19 @@ class TimeSeriesAnalyzer:
     def generate_plots(self):
         plots = {}
 
+        # Série original
         fig1 = px.line(self.df, x=self.df.index, y='value', title='Série Temporal Original')
         fig1.update_layout(xaxis_title='Tempo', yaxis_title='Valor', height=500)
         plots['original'] = fig1
 
+        # Distribuição
         fig2 = make_subplots(rows=1, cols=2, subplot_titles=('Histograma', 'Box Plot'))
         fig2.add_trace(go.Histogram(x=self.df['value'], nbinsx=50, marker_color='skyblue'), row=1, col=1)
         fig2.add_trace(go.Box(y=self.df['value'], marker_color='lightcoral'), row=1, col=2)
         fig2.update_layout(title_text='Distribuição dos Valores', height=500)
         plots['distribution'] = fig2
 
+        # Decomposição
         if self.decomposition is not None:
             fig3 = make_subplots(
                 rows=4, cols=1, shared_xaxes=True,
@@ -393,6 +420,7 @@ class TimeSeriesAnalyzer:
             fig3.update_layout(height=900, title_text="Decomposição Sazonal", showlegend=False)
             plots['decomposition'] = fig3
 
+        # Padrões sazonais avançados
         if hasattr(self, 'seasonality_results') and 'patterns' in self.seasonality_results:
             patterns = self.seasonality_results['patterns']
             
@@ -400,14 +428,16 @@ class TimeSeriesAnalyzer:
             
             if available_patterns:
                 n_plots = len(available_patterns)
-                titles = {
-                    'hourly': 'Por Hora',
-                    'weekly': 'Por Dia da Semana',
-                    'monthly': 'Por Semana do Mês'
-                }
-                subplot_titles = [titles[k] for k in available_patterns]
+                titles = []
+                for p in available_patterns:
+                    if p == 'hourly':
+                        titles.append('Por Hora')
+                    elif p == 'weekly':
+                        titles.append('Por Dia da Semana')
+                    elif p == 'monthly':
+                        titles.append('Por Dia do Mês')
                 
-                fig4 = make_subplots(rows=1, cols=n_plots, subplot_titles=subplot_titles)
+                fig4 = make_subplots(rows=1, cols=n_plots, subplot_titles=titles)
                 
                 for idx, pattern_type in enumerate(available_patterns, 1):
                     if pattern_type == 'hourly':
@@ -428,16 +458,18 @@ class TimeSeriesAnalyzer:
                         )
                     
                     elif pattern_type == 'monthly':
-                        weeks = ['1ª Semana', '2ª Semana', '3ª Semana', '4ª Semana', '5ª Semana']
-                        y_vals = [patterns['monthly'].loc[w, 'mean'] if w in patterns['monthly'].index else 0 for w in range(1, 6)]
+                        x_vals = list(range(1, 32))
+                        y_vals = [patterns['monthly'].loc[d, 'mean'] if d in patterns['monthly'].index else np.nan for d in range(1, 32)]
                         fig4.add_trace(
-                            go.Bar(x=weeks, y=y_vals, name='Média por Semana do Mês', marker_color='lightskyblue'),
+                            go.Scatter(x=x_vals, y=y_vals, mode='lines+markers',
+                                     name='Média por Dia do Mês', marker_color='mediumpurple'),
                             row=1, col=idx
                         )
                 
                 fig4.update_layout(height=500, title_text="Padrões Sazonais Detalhados")
                 plots['patterns'] = fig4
 
+        # Detecção de saltos
         fig5 = px.line(self.df, x=self.df.index, y='value', title='Detecção de Saltos/Outliers')
         fig5.update_traces(line=dict(width=1.5))
         
@@ -459,7 +491,7 @@ class TimeSeriesAnalyzer:
 def show_seasonality_results(seasonality_results):
     """Exibe os resultados detalhados da análise de sazonalidade"""
     
-    col1, col2 = st.columns(2)
+    col1, col2  = st.columns(2)
     
     classification = seasonality_results['classification']
     season_type = seasonality_results['season_type']
@@ -468,7 +500,6 @@ def show_seasonality_results(seasonality_results):
         'SAZONAL_DIARIA': '🟢',
         'SAZONAL_SEMANAL': '🔵', 
         'SAZONAL_MENSAL': '🟣',
-        'SAZONAL_MISTA': '🟡',
         'LINEAR': '⚪'
     }
     
@@ -481,57 +512,61 @@ def show_seasonality_results(seasonality_results):
     
     # Teste diário
     with col1:
-        st.markdown("**🌅 Sazonalidade Diária**")
+        st.markdown("**🌅 Sazonalidade Diária (por hora)**")
         daily_test = seasonality_results.get('daily_test', {})
         
         if daily_test.get('has_pattern', False):
             st.success("✅ Padrão diário detectado!")
-            st.write(f"• Variância: {daily_test.get('variance_explained', 0):.1f}%")
+            st.write(f"• Variância explicada: {daily_test.get('variance_explained', 0):.1f}%")
             st.write(f"• P-valor: {daily_test.get('p_value', 0):.6f}")
-            st.write(f"• Pico: {daily_test.get('peak_hour', 'N/A')}h")
-            st.write(f"• Vale: {daily_test.get('low_hour', 'N/A')}h")
+            st.write(f"• Pico às: {daily_test.get('peak_hour', 'N/A')}h")
+            st.write(f"• Vale às: {daily_test.get('low_hour', 'N/A')}h")
         else:
-            st.info("ℹ️ Sem padrão diário")
+            st.info("ℹ️ Sem padrão diário significativo")
+            if 'error' in daily_test:
+                st.error(f"Erro: {daily_test['error']}")
     
     # Teste semanal  
     with col2:
-        st.markdown("**📅 Sazonalidade Semanal**")
+        st.markdown("**📅 Sazonalidade Semanal (por dia)**")
         weekly_test = seasonality_results.get('weekly_test', {})
         
         if weekly_test.get('has_pattern', False):
             st.success("✅ Padrão semanal detectado!")
-            st.write(f"• Variância: {weekly_test.get('variance_explained', 0):.1f}%")
+            st.write(f"• Variância explicada: {weekly_test.get('variance_explained', 0):.1f}%")
             st.write(f"• P-valor: {weekly_test.get('p_value', 0):.6f}")
             
-            days_map = {0: 'Seg', 1: 'Ter', 2: 'Qua', 3: 'Qui', 
-                       4: 'Sex', 5: 'Sáb', 6: 'Dom'}
+            days_map = {0: 'Segunda', 1: 'Terça', 2: 'Quarta', 3: 'Quinta', 
+                       4: 'Sexta', 5: 'Sábado', 6: 'Domingo'}
             peak_day = days_map.get(weekly_test.get('peak_day'), 'N/A')
             low_day = days_map.get(weekly_test.get('low_day'), 'N/A')
             
             st.write(f"• Pico: {peak_day}")
             st.write(f"• Vale: {low_day}")
+            st.write(f"• Diferença úteis/fds: {weekly_test.get('weekday_weekend_diff', 0):.1f}%")
         else:
-            st.info("ℹ️ Sem padrão semanal")
+            st.info("ℹ️ Sem padrão semanal significativo")
+            if 'error' in weekly_test:
+                st.error(f"Erro: {weekly_test['error']}")
     
-    # Teste mensal (ATUALIZADO)
+    # Teste mensal (NOVO)
     with col3:
-        st.markdown("**📆 Sazonalidade Mensal**")
+        st.markdown("**🗓️ Sazonalidade Mensal (por dia do mês)**")
         monthly_test = seasonality_results.get('monthly_test', {})
         
         if monthly_test.get('has_pattern', False):
             st.success("✅ Padrão mensal detectado!")
-            st.write(f"• Variância: {monthly_test.get('variance_explained', 0):.1f}%")
+            st.write(f"• Variância explicada: {monthly_test.get('variance_explained', 0):.1f}%")
             st.write(f"• P-valor: {monthly_test.get('p_value', 0):.6f}")
-            
-            weeks_map = {1: '1ª Semana', 2: '2ª Semana', 3: '3ª Semana', 
-                        4: '4ª Semana', 5: '5ª Semana'}
-            peak_week = weeks_map.get(monthly_test.get('peak_week'), 'N/A')
-            low_week = weeks_map.get(monthly_test.get('low_week'), 'N/A')
-            
-            st.write(f"• Pico: {peak_week}")
-            st.write(f"• Vale: {low_week}")
+            st.write(f"• Pico no dia: {monthly_test.get('peak_day', 'N/A')}")
+            st.write(f"• Vale no dia: {monthly_test.get('low_day', 'N/A')}")
+            st.write(f"• Meses analisados: {monthly_test.get('n_months', 0)}")
         else:
-            st.info("ℹ️ Sem padrão mensal")
+            st.info("ℹ️ Sem padrão mensal significativo")
+            if 'reason' in monthly_test:
+                st.caption(f"({monthly_test['reason']})")
+            if 'error' in monthly_test:
+                st.error(f"Erro: {monthly_test['error']}")
 
 
 def show_summary(analyzer, basic_stats, freq_desc, jump_count, seasonality_results):
@@ -629,7 +664,6 @@ def show_download(selected_file, seasonality_results, freq_desc, jump_count, bas
         mime="text/csv"
     )
 
-
 def extract_sigla_servico(file_name):
     try:
         sigla = file_name.split("sigla-")[1].split("_")[0] if "sigla-" in file_name else "N/A"
@@ -638,9 +672,8 @@ def extract_sigla_servico(file_name):
     except Exception:
         return "N/A", "N/A"
 
-
 def batch_analyze_all(threshold_std: float = 3.0):
-    series_folder = "series_temporais/series_manhatam/series_temporais_tier_0"
+    series_folder = "series_temporais"
     all_results = []
     csv_files = [f for f in os.listdir(series_folder) if f.endswith(".csv")]
     
@@ -666,6 +699,7 @@ def batch_analyze_all(threshold_std: float = 3.0):
         analyzer.detect_jumps(threshold_std)
         
         decomp = analyzer.analysis_results.get("decomposition", {})
+        stat = analyzer.analysis_results.get("stationarity", {})
         basic = analyzer.analysis_results.get("basic_stats", {})
         jumps = analyzer.analysis_results.get("jumps", {})
         
@@ -703,7 +737,7 @@ def main():
     
     st.sidebar.header("🔧 Configurações")
     
-    series_folder = "series_temporais/series_manhatam/series_temporais_tier_0"
+    series_folder = "series_temporais"
     
     if os.path.exists(series_folder):
         csv_files = [f for f in os.listdir(series_folder) if f.endswith('.csv')]
@@ -727,9 +761,8 @@ def main():
                 for classification, count in summary_counts.items():
                     emoji_map = {
                         'SAZONAL_DIARIA': '🌅',
-                        'SAZONAL_SEMANAL': '📅', 
-                        'SAZONAL_MENSAL': '🟣',
-                        'SAZONAL_MISTA': '🔄',
+                        'SAZONAL_SEMANAL': '📅',
+                        'SAZONAL_MENSAL': '🗓️',
                         'LINEAR': '📈'
                     }
                     emoji = emoji_map.get(classification, '❓')
@@ -744,7 +777,7 @@ def main():
             selected_file = st.sidebar.selectbox(
                 "Escolha uma série temporal:",
                 csv_files,
-                help="Selecione um arquivo CSV da pasta series_temporais"
+                help="Selecione um arquivo CSV da pasta series_temporaiscpu"
             )
             
             file_path = os.path.join(series_folder, selected_file)
@@ -773,7 +806,7 @@ def main():
                     progress_bar.progress(30)
                     freq_code, freq_desc = analyzer.detect_frequency()
                     
-                    status_text.text('Analisando sazonalidade...')
+                    status_text.text('Analisando padrões de sazonalidade...')
                     progress_bar.progress(50)
                     seasonality_results = analyzer.advanced_seasonality_detection()
                     
@@ -826,10 +859,10 @@ def main():
                     show_download(selected_file, seasonality_results, freq_desc, 
                                 jump_count, basic_stats)
         else:
-            st.error("❌ Nenhum arquivo CSV encontrado na pasta")
+            st.error("❌ Nenhum arquivo CSV encontrado na pasta 'series_temporaiscpu'")
     else:
-        st.error("❌ Pasta não encontrada")
-        st.info("💡 Certifique-se de que a pasta existe e contém arquivos CSV")
+        st.error("❌ Pasta 'series_temporaiscpu' não encontrada")
+        st.info("💡 Certifique-se de que a pasta 'series_temporaiscpu' existe e contém arquivos CSV com colunas 'datetime' e 'value'")
 
 
 if __name__ == "__main__":
