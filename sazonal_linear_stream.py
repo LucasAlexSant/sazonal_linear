@@ -101,17 +101,60 @@ class TimeSeriesAnalyzer:
 
     def advanced_seasonality_detection(self):
         """
-        Detecta padrões de sazonalidade diária e semanal com testes estatísticos
+        Detecta padrões de sazonalidade horária, diária e semanal com testes estatísticos
         """
         temp_df = self.df.copy()
+        temp_df['minute'] = temp_df.index.minute
         temp_df['hour'] = temp_df.index.hour
         temp_df['day_of_week'] = temp_df.index.dayofweek  # 0=Segunda, 6=Domingo
         temp_df['is_weekend'] = temp_df['day_of_week'].isin([5, 6])  # Sábado e Domingo
         temp_df['is_business_day'] = ~temp_df['is_weekend']
 
         seasonality_tests = {}
+        
+        # 0. TESTE DE SAZONALIDADE HORÁRIA (por minuto dentro da hora)
+        if temp_df['minute'].nunique() > 1:
+            # Agrupamento por minuto
+            minute_groups = [group['value'].values for name, group in temp_df.groupby('minute') if len(group) >= 2]
+            
+            if len(minute_groups) >= 3:
+                # ANOVA para testar se há diferenças significativas entre os minutos
+                try:
+                    f_stat, p_value_minute = f_oneway(*minute_groups)
+                    
+                    # Cálculo correto da variância explicada usando R²
+                    minute_means = temp_df.groupby('minute')['value'].mean()
+                    overall_mean = temp_df['value'].mean()
+                    
+                    # Soma dos quadrados entre grupos (SSB)
+                    temp_df_with_minute_mean = temp_df.copy()
+                    temp_df_with_minute_mean['minute_mean'] = temp_df_with_minute_mean['minute'].map(minute_means)
+                    ssb = ((temp_df_with_minute_mean['minute_mean'] - overall_mean) ** 2).sum()
+                    
+                    # Soma dos quadrados total (SST)
+                    sst = ((temp_df['value'] - overall_mean) ** 2).sum()
+                    
+                    # R² = SSB / SST (percentual de variância explicada)
+                    minute_variance_explained = (ssb / sst) * 100 if sst > 0 else 0
+                    
+                    seasonality_tests['hourly'] = {
+                        'has_pattern': p_value_minute < 0.05,
+                        'p_value': p_value_minute,
+                        'f_statistic': f_stat,
+                        'variance_explained': minute_variance_explained,
+                        'peak_minute': minute_means.idxmax(),
+                        'low_minute': minute_means.idxmin(),
+                        'minute_range': minute_means.max() - minute_means.min()
+                    }
+                    
+                except Exception as e:
+                    seasonality_tests['hourly'] = {'has_pattern': False, 'error': str(e)}
+            else:
+                seasonality_tests['hourly'] = {'has_pattern': False, 'reason': 'Dados insuficientes'}
+        else:
+            seasonality_tests['hourly'] = {'has_pattern': False, 'reason': 'Dados sem variação de minutos'}
 
-        # 1. TESTE DE SAZONALIDADE DIÁRIA (por hora)
+        # 1. TESTE DE SAZONALIDADE DIÁRIA (por hora do dia)
         if temp_df['hour'].nunique() > 1:
             # Agrupamento por hora
             hourly_groups = [group['value'].values for name, group in temp_df.groupby('hour') if len(group) >= 2]
@@ -198,16 +241,21 @@ class TimeSeriesAnalyzer:
                 seasonality_tests['weekly'] = {'has_pattern': False, 'reason': 'Dados insuficientes'}
 
         # 3. CLASSIFICAÇÃO FINAL DA SAZONALIDADE
+        hourly_strong = seasonality_tests.get('hourly', {}).get('variance_explained', 0) > 10
         daily_strong = seasonality_tests.get('daily', {}).get('variance_explained', 0) > 15
         weekly_strong = seasonality_tests.get('weekly', {}).get('variance_explained', 0) > 10
 
+        hourly_significant = seasonality_tests.get('hourly', {}).get('has_pattern', False)
         daily_significant = seasonality_tests.get('daily', {}).get('has_pattern', False)
         weekly_significant = seasonality_tests.get('weekly', {}).get('has_pattern', False)
 
-        # Lógica de classificação refinada
-        if daily_significant and daily_strong:
+        # Lógica de classificação refinada com sazonalidade horária
+        if hourly_significant and hourly_strong:
+            main_seasonality = "SAZONAL_HORARIA"
+            season_type = "horária (intra-hora)"
+        elif daily_significant and daily_strong:
             if weekly_significant and weekly_strong:
-                main_seasonality = "SAZONAL_misto"  # Tanto diária quanto semanal
+                main_seasonality = "SAZONAL_MISTA"
                 season_type = "mista (diária + semanal)"
             else:
                 main_seasonality = "SAZONAL_DIARIA"
@@ -215,12 +263,9 @@ class TimeSeriesAnalyzer:
         elif weekly_significant and weekly_strong:
             main_seasonality = "SAZONAL_SEMANAL"
             season_type = "semanal"
-        elif daily_significant:
-            main_seasonality = "LINEAR"
-            season_type = "não sazonal"
-        elif weekly_significant:
-            main_seasonality = "LINEAR"
-            season_type = "não sazonal"
+        elif hourly_significant or daily_significant or weekly_significant:
+            main_seasonality = "SAZONAL_FRACA"
+            season_type = "fraca"
         else:
             main_seasonality = "LINEAR"
             season_type = "não sazonal"
@@ -228,6 +273,7 @@ class TimeSeriesAnalyzer:
         self.seasonality_results = {
             'classification': main_seasonality,
             'season_type': season_type,
+            'hourly_test': seasonality_tests.get('hourly', {}),
             'daily_test': seasonality_tests.get('daily', {}),
             'weekly_test': seasonality_tests.get('weekly', {}),
             'patterns': self.get_detailed_patterns(temp_df)
@@ -238,6 +284,10 @@ class TimeSeriesAnalyzer:
     def get_detailed_patterns(self, temp_df):
         """Obtém padrões detalhados para visualização"""
         patterns = {}
+
+        # Padrões por minuto (intra-hora)
+        if temp_df['minute'].nunique() > 1:
+            patterns['minute'] = temp_df.groupby('minute')['value'].agg(['mean', 'std', 'count'])
 
         # Padrões por hora
         if temp_df['hour'].nunique() > 1:
@@ -261,7 +311,16 @@ class TimeSeriesAnalyzer:
             # Determina o período baseado na análise de sazonalidade avançada
             seasonality_info = self.seasonality_results
 
-            if seasonality_info['classification'] == 'SAZONAL_DIARIA':
+            if seasonality_info['classification'] == 'SAZONAL_HORARIA':
+                # Para sazonalidade horária (intra-hora), usar 60 períodos (minutos)
+                if freq_seconds <= 60:  # Dados por minuto ou menos
+                    period = 60
+                elif freq_seconds <= 3600:  # Dados por hora
+                    period = 24
+                else:
+                    period = max(2, n // 10)
+
+            elif seasonality_info['classification'] == 'SAZONAL_DIARIA':
                 # Para sazonalidade diária, usar 24 períodos (horas) ou equivalente
                 if freq_seconds <= 3600:  # Dados por hora ou menos
                     period = 24
@@ -283,6 +342,9 @@ class TimeSeriesAnalyzer:
                     period = 24
                 else:
                     period = 7
+            elif seasonality_info['classification'] == 'SAZONAL_FRACA':
+                # Para sazonalidade fraca, usar período moderado
+                period = max(2, min(n // 6, 12))
             else:
                 # Para casos lineares ou sazonalidade fraca
                 period = max(2, min(n // 4, 12))
@@ -372,17 +434,26 @@ class TimeSeriesAnalyzer:
             patterns = self.seasonality_results['patterns']
 
             # Criar subplots baseados nos padrões disponíveis
-            available_patterns = [k for k in ['hourly', 'weekly'] if k in patterns and len(patterns[k]) > 0]
+            available_patterns = [k for k in ['minute', 'hourly', 'weekly'] if k in patterns and len(patterns[k]) > 0]
 
             if available_patterns:
                 n_plots = len(available_patterns)
                 fig4 = make_subplots(
                     rows=1, cols=n_plots,
-                    subplot_titles=[k.replace('hourly', 'Por Hora').replace('weekly', 'Por Dia da Semana') for k in available_patterns]
+                    subplot_titles=[k.replace('minute', 'Por Minuto').replace('hourly', 'Por Hora').replace('weekly', 'Por Dia da Semana') for k in available_patterns]
                 )
 
                 for idx, pattern_type in enumerate(available_patterns, 1):
-                    if pattern_type == 'hourly':
+                    if pattern_type == 'minute':
+                        x_vals = list(range(60))
+                        y_vals = [patterns['minute'].loc[m, 'mean'] if m in patterns['minute'].index else 0 for m in range(60)]
+                        fig4.add_trace(
+                            go.Scatter(x=x_vals, y=y_vals, mode='lines+markers',
+                                     name='Média por Minuto', marker_color='lightblue'),
+                            row=1, col=idx
+                        )
+
+                    elif pattern_type == 'hourly':
                         x_vals = list(range(24))
                         y_vals = [patterns['hourly'].loc[h, 'mean'] if h in patterns['hourly'].index else 0 for h in range(24)]
                         fig4.add_trace(
@@ -431,6 +502,7 @@ def show_seasonality_results(seasonality_results):
 
     # Cores baseadas na classificação
     color_map = {
+        'SAZONAL_HORARIA': '🟣',
         'SAZONAL_DIARIA': '🟢',
         'SAZONAL_SEMANAL': '🔵',
         'SAZONAL_MISTA': '🟡',
@@ -444,10 +516,26 @@ def show_seasonality_results(seasonality_results):
     # Detalhes dos testes estatísticos
     st.subheader("📊 Testes Estatísticos de Sazonalidade")
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
+
+    # Teste horário (intra-hora)
+    with col1:
+        st.markdown("**⏰ Sazonalidade Horária (por minuto)**")
+        hourly_test = seasonality_results.get('hourly_test', {})
+
+        if hourly_test.get('has_pattern', False):
+            st.success("✅ Padrão horário detectado!")
+            st.write(f"• Variância explicada: {hourly_test.get('variance_explained', 0):.1f}%")
+            st.write(f"• P-valor: {hourly_test.get('p_value', 0):.6f}")
+            st.write(f"• Pico no minuto: {hourly_test.get('peak_minute', 'N/A')}")
+            st.write(f"• Vale no minuto: {hourly_test.get('low_minute', 'N/A')}")
+        else:
+            st.info("ℹ️ Sem padrão horário significativo")
+            if 'error' in hourly_test:
+                st.error(f"Erro: {hourly_test['error']}")
 
     # Teste diário
-    with col1:
+    with col2:
         st.markdown("**🌅 Sazonalidade Diária (por hora)**")
         daily_test = seasonality_results.get('daily_test', {})
 
@@ -463,7 +551,7 @@ def show_seasonality_results(seasonality_results):
                 st.error(f"Erro: {daily_test['error']}")
 
     # Teste semanal
-    with col2:
+    with col3:
         st.markdown("**📅 Sazonalidade Semanal (por dia)**")
         weekly_test = seasonality_results.get('weekly_test', {})
 
@@ -483,6 +571,14 @@ def show_seasonality_results(seasonality_results):
         else:
             st.info("ℹ️ Sem padrão semanal significativo")
             if 'error' in weekly_test:
+                st.error(f"Erro: {weekly_test['error']}").get('low_day'), 'N/A')
+
+            st.write(f"• Pico: {peak_day}")
+            st.write(f"• Vale: {low_day}")
+            st.write(f"• Diferença úteis/fds: {weekly_test.get('weekday_weekend_diff', 0):.1f}%")
+        else:
+            st.info("ℹ️ Sem padrão semanal significativo")
+            if 'error' in weekly_test:
                 st.error(f"Erro: {weekly_test['error']}")
 
 
@@ -492,9 +588,10 @@ def show_summary(analyzer, basic_stats, freq_desc, jump_count, seasonality_resul
     classification = seasonality_results['classification']
 
     # Determina a variância sazonal total
+    hourly_var = seasonality_results.get('hourly_test', {}).get('variance_explained', 0)
     daily_var = seasonality_results.get('daily_test', {}).get('variance_explained', 0)
     weekly_var = seasonality_results.get('weekly_test', {}).get('variance_explained', 0)
-    max_seasonal_var = max(daily_var, weekly_var)
+    max_seasonal_var = max(hourly_var, daily_var, weekly_var)
 
     col1.metric(
         "Classificação",
@@ -556,6 +653,7 @@ def show_download(selected_file, seasonality_results, freq_desc, jump_count, bas
     season_type = seasonality_results['season_type']
 
     # Calcula variância sazonal máxima
+    hourly_var = seasonality_results.get('hourly_test', {}).get('variance_explained', 0)
     daily_var = seasonality_results.get('daily_test', {}).get('variance_explained', 0)
     weekly_var = seasonality_results.get('weekly_test', {}).get('variance_explained', 0)
 
@@ -563,6 +661,7 @@ def show_download(selected_file, seasonality_results, freq_desc, jump_count, bas
         'arquivo': selected_file,
         'classificacao': classification,
         'tipo_sazonalidade': season_type,
+        'variancia_sazonal_horaria': hourly_var,
         'variancia_sazonal_diaria': daily_var,
         'variancia_sazonal_semanal': weekly_var,
         'frequencia': freq_desc,
@@ -624,6 +723,7 @@ def batch_analyze_all(threshold_std: float = 3.0):
         jumps = analyzer.analysis_results.get("jumps", {})
 
         # Análise de sazonalidade detalhada
+        hourly_var = seasonality_results.get('hourly_test', {}).get('variance_explained', 0)
         daily_var = seasonality_results.get('daily_test', {}).get('variance_explained', 0)
         weekly_var = seasonality_results.get('weekly_test', {}).get('variance_explained', 0)
 
@@ -631,6 +731,7 @@ def batch_analyze_all(threshold_std: float = 3.0):
             "sigla": extract_sigla_servico(file_name)[0],
             "servico": extract_sigla_servico(file_name)[1],
             "classificacao": seasonality_results.get('classification', 'N/A'),
+            "variancia_sazonal_horaria": hourly_var,
             "variancia_sazonal_diaria": daily_var,
             "variancia_sazonal_semanal": weekly_var,
             "saltos_detectados": jumps.get("count", 0),
@@ -651,7 +752,7 @@ def batch_analyze_all(threshold_std: float = 3.0):
 
 def main():
     st.title("📈 Análise Avançada de Séries Temporais com Detecção de Sazonalidade")
-    st.markdown("**Sistema aprimorado para detectar padrões sazonais diários e semanais**")
+    st.markdown("**Sistema aprimorado para detectar padrões sazonais horários, diários e semanais**")
     st.markdown("---")
 
     st.sidebar.header("🔧 Configurações")
@@ -681,6 +782,7 @@ def main():
                 st.subheader("📊 Resumo Geral de Classificação")
                 for classification, count in summary_counts.items():
                     emoji_map = {
+                        'SAZONAL_HORARIA': '⏰',
                         'SAZONAL_DIARIA': '🌅',
                         'SAZONAL_SEMANAL': '📅',
                         'SAZONAL_MISTA': '🔄',
